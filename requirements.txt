@@ -1,0 +1,4 @@
+# 本插件依赖 jmcomic 的若干内部接口（Img2pdfPlugin、JmModuleConfig.register_plugin、
+# download_photo 的返回结构等），锁定版本以免上游变更后失效。
+jmcomic==2.7.6
+img2pdf==0.6.3

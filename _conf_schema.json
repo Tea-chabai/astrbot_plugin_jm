@@ -1,0 +1,56 @@
+{
+  "output_dir": {
+    "description": "PDF 输出目录",
+    "type": "string",
+    "default": "",
+    "hint": "存放下载的图片与生成的 PDF。留空则使用 AstrBot 数据目录下的 plugin_data/astrbot_plugin_jm。"
+  },
+  "username": {
+    "description": "JM 账号",
+    "type": "string",
+    "default": "",
+    "hint": "需要登录才能查看的本子请填写账号，插件启动时会自动登录。留空则游客访问。"
+  },
+  "password": {
+    "description": "JM 密码",
+    "type": "string",
+    "default": "",
+    "hint": "与账号配套填写。密码以明文保存在 AstrBot 的插件配置中，请勿泄露 data 目录。"
+  },
+  "cookies": {
+    "description": "JM 站点 Cookies",
+    "type": "text",
+    "default": "",
+    "hint": "填写 Cookies 可跳过登录直接携带登录态，格式：AVS=xxx; SESSION=xxx，可从浏览器开发者工具的请求头中复制。与账号密码二选一即可。"
+  },
+  "threads": {
+    "description": "图片下载线程数",
+    "type": "int",
+    "default": 8,
+    "hint": "并发下载图片的线程数，过大可能被站点限流。建议 4~16。"
+  },
+  "timeout": {
+    "description": "单次下载超时（秒）",
+    "type": "int",
+    "default": 1800,
+    "hint": "超过该时长仍未完成则中止本次下载，长篇本子可适当调大。"
+  },
+  "max_images": {
+    "description": "单本图片数量上限",
+    "type": "int",
+    "default": 500,
+    "hint": "超过该数量的本子将拒绝下载，避免生成过大的 PDF 拖垮机器人。"
+  },
+  "delete_images": {
+    "description": "生成 PDF 后删除原始图片",
+    "type": "bool",
+    "default": true,
+    "hint": "开启可节省磁盘空间；关闭则保留图片文件夹以便排查问题。"
+  },
+  "retry_times": {
+    "description": "网络请求重试次数",
+    "type": "int",
+    "default": 3,
+    "hint": "请求 JM 接口失败时的重试次数。"
+  }
+}
