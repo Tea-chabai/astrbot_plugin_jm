@@ -5,6 +5,24 @@
     "default": "",
     "hint": "存放下载的图片与生成的 PDF。留空则使用 AstrBot 数据目录下的 plugin_data/astrbot_plugin_jm。"
   },
+  "allow_multi_chapter": {
+    "description": "允许下载多章节本子",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时多章节本子会被拒绝，只支持单章节，保持轻量下载的定位。开启后多章节本子会逐章生成 PDF 并打包成 ZIP 发送。"
+  },
+  "max_chapters": {
+    "description": "单次可下载的章节数上限",
+    "type": "int",
+    "default": 30,
+    "hint": "仅在开启多章节下载时生效。超过该数量的本子会拒绝下载，避免一次请求占用过久。"
+  },
+  "lock_password": {
+    "description": "PDF 与 ZIP 的加密密码",
+    "type": "string",
+    "default": "",
+    "hint": "留空则不加密码。设置后：多章节的 ZIP 以及其中的每个 PDF 都会用该密码加密，密码会在回复消息中一并告知使用者。至少 4 位。"
+  },
   "username": {
     "description": "JM 账号",
     "type": "string",
@@ -15,7 +33,7 @@
     "description": "JM 密码",
     "type": "string",
     "default": "",
-    "hint": "与账号配套填写。密码以明文保存在 AstrBot 的插件配置中，请勿泄露 data 目录。"
+    "hint": "与 JM 账号配套填写。密码以明文保存在 AstrBot 的插件配置中，请勿泄露 data 目录。"
   },
   "cookies": {
     "description": "JM 站点 Cookies",

@@ -1,5 +1,5 @@
 name: astrbot_plugin_jm # 插件唯一识别名
 desc: 使用 /jm <编号> 下载 JM 本子并转换为 PDF 发送 # 插件简短描述
-version: v1.0.0 # 插件版本号
+version: v1.1.1 # 插件版本号
 author: Tea-chabai # 作者
 repo: https://github.com/Tea-chabai/astrbot_plugin_jm # 插件仓库地址
