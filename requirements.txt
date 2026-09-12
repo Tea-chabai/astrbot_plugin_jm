@@ -2,8 +2,6 @@
 # download_photo 的返回结构等），锁定版本以免上游变更后失效。
 jmcomic==2.7.6
 img2pdf==0.6.3
-# PDF 加密（pikepdf 也是 img2pdf 的依赖，此处显式声明以免上游变更）
-pikepdf
 # ZIP 加密：标准库 zipfile 不支持写入加密包，传统 ZipCrypto 较新的
 # Windows 资源管理器又打不开，故用 pyzipper 写 WinZip AES 加密
 pyzipper

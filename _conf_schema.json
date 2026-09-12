@@ -17,11 +17,17 @@
     "default": 30,
     "hint": "仅在开启多章节下载时生效。超过该数量的本子会拒绝下载，避免一次请求占用过久。"
   },
+  "encrypt_output": {
+    "description": "加密输出文件",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，发送的文件一律打包成 ZIP 并用下面的密码加密（单章节也会打包）。ZIP 里的 PDF 不单独加密，解压后可直接阅读。需同时设置「加密密码」。"
+  },
   "lock_password": {
-    "description": "PDF 与 ZIP 的加密密码",
+    "description": "加密密码",
     "type": "string",
     "default": "",
-    "hint": "留空则不加密码。设置后：多章节的 ZIP 以及其中的每个 PDF 都会用该密码加密，密码会在回复消息中一并告知使用者。至少 4 位。"
+    "hint": "上面的开关开启时生效，密码会随回复消息告知使用者。至少 4 位，否则会被忽略。密码以明文保存在配置中，请勿泄露 data 目录。"
   },
   "username": {
     "description": "JM 账号",

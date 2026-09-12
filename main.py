@@ -77,6 +77,15 @@ _MAX_TITLE_LEN = 30
 _MAX_ALBUM_IMAGES = 3000
 
 
+def _same_id(left, right) -> bool:
+    """比较两个 JM 编号是否相同。
+
+    jmcomic 里编号有时是 int 有时是 str（例如 ``album.id`` 返回 int，而
+    用户输入与 ``episode_list`` 里的是 str），直接比较会静默失配。
+    """
+    return str(left).strip() == str(right).strip()
+
+
 def _clean_title(title: str) -> str:
     """把本子标题清洗成安全的文件名片段（不含扩展名）。"""
     # 先折叠清理，再按白名单过滤，多余字符替换为下划线后折叠重复项
@@ -152,19 +161,12 @@ def _register_title_pdf_plugin():
     jmcomic.JmModuleConfig.register_plugin(TitlePdfPlugin)
 
 
-def _encrypt_pdf(pdf_path: str, password: str) -> None:
-    """给 PDF 加上打开密码（就地覆盖）。"""
-    import pikepdf
-
-    with pikepdf.open(pdf_path, allow_overwriting_input=True) as pdf:
-        pdf.save(
-            pdf_path,
-            encryption=pikepdf.Encryption(user=password, owner=password),
-        )
-
-
 class MissingBookError(Exception):
     """本子不存在或不可见。"""
+
+
+class ChapterNotFoundError(Exception):
+    """指定的章号超出本子的章节范围。"""
 
 
 class MultiChapterError(Exception):
@@ -187,7 +189,7 @@ class TooManyAlbumImagesError(Exception):
     "astrbot_plugin_jm",
     "Tea-chabai",
     "使用 /jm <编号> 下载 JM 本子并转为 PDF 发送",
-    "v1.1.1",
+    "v1.2.0",
 )
 class JmDownloaderPlugin(Star):
     """JM 本子下载插件
@@ -197,13 +199,15 @@ class JmDownloaderPlugin(Star):
     /jm <编号>
     --下载指定编号的本子，成功后将 PDF 发送到当前会话
     --编号可以在本子详情页的地址栏中获取
-    --对多章节作品，给出其中某一章的编号即下载该章
+    --多章节作品会下载整本，每章一个 PDF 并打包成 ZIP
+
+    /jm <编号> <章号>
+    --只下载多章节本子中的某一章，例如 /jm 553653 2
 
     /jmhelp
     --查看帮助
 
     多章节作品默认会被拒绝，需要在配置中开启「允许下载多章节本子」。
-    开启后会把每一章生成为独立的 PDF，打包成 ZIP 一并发送。
     """
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -219,10 +223,21 @@ class JmDownloaderPlugin(Star):
         self.allow_multi_chapter = bool(self.config.get("allow_multi_chapter", False))
         self.max_chapters = int(self.config.get("max_chapters", 30))
 
-        # PDF / ZIP 的加密密码
+        # 输出加密：开启后所有产物都打包成 ZIP 并加密。
+        # 只加密 ZIP，内部的 PDF 不再逐个加密——解压后直接可读，
+        # 不必每开一章输一次密码。
+        self.encrypt_output = bool(self.config.get("encrypt_output", False))
         self.lock_password = (self.config.get("lock_password") or "").strip()
-        if self.lock_password and len(self.lock_password) < 4:
-            logger.warning("[JM] lock_password 少于 4 位，已忽略，本次不加密")
+
+        if self.encrypt_output and len(self.lock_password) < 4:
+            logger.warning(
+                "[JM] 已开启加密但 lock_password 少于 4 位，本次不加密。"
+                "请设置至少 4 位的密码。"
+            )
+            self.encrypt_output = False
+            self.lock_password = ""
+        elif not self.encrypt_output:
+            # 开关没开时密码不生效，清掉以免消息里误报密码
             self.lock_password = ""
 
         # PDF 输出目录：未配置时使用插件数据目录
@@ -317,8 +332,10 @@ class JmDownloaderPlugin(Star):
 
     # -------------------------------------------------------------- 业务逻辑
 
-    def _validate_book(self, book_id: str) -> dict:
+    def _validate_book(self, book_id: str, chapter: Optional[int] = None) -> dict:
         """校验编号对应的本子，返回后续下载所需的信息。
+
+        ``chapter`` 为章节序号（从 1 起）时只要该章；否则下载整本。
 
         Raises:
             MissingBookError: 编号不存在或不可见。
@@ -340,25 +357,38 @@ class JmDownloaderPlugin(Star):
 
         if is_multi and not self.allow_multi_chapter:
             raise MultiChapterError(f"{len(episodes)} 章")
-        if is_multi and len(episodes) > self.max_chapters:
-            raise TooManyChaptersError(
-                f"共 {len(episodes)} 章，超过上限 {self.max_chapters} 章"
-            )
-        if is_multi and album.page_count > _MAX_ALBUM_IMAGES:
-            raise TooManyAlbumImagesError(
-                f"共 {album.page_count} 张，超过硬性上限 {_MAX_ALBUM_IMAGES} 张"
-            )
 
-        # 章节 ID 要定位到对应那一章，不能一律当作第一章，
-        # 否则用户发第 N 章的编号会静默拿到第 1 章
-        chapter_index = 0
-        for index, episode in enumerate(episodes):
-            if str(episode[0]) == book_id:
-                chapter_index = index
-                break
+        # 用章节参数指定了具体章号就只取该章，否则整本。
+        #
+        # 注意不能用 ID 区分这两种意图：JM 的专辑 ID 与第 1 章 photo ID 是
+        # 同一个值，而且用章节 ID 查专辑时返回的 album.id 就是那个章节 ID。
+        # 所以「单章」只能靠显式参数表达。
+        if chapter is not None:
+            if len(episodes) == 1:
+                raise ChapterNotFoundError("这是一本单章节本子，不需要指定章号")
+            if chapter < 1 or chapter > len(episodes):
+                raise ChapterNotFoundError(
+                    f"本子共 {len(episodes)} 章，没有第 {chapter} 章"
+                )
+            download_all = False
+            chapter_index = chapter - 1
         else:
-            # 用户给的是专辑编号（或不在列表里的编号），退回第一章
-            logger.info(f"[JM] {book_id} 未匹配到具体章节，使用第 1 章")
+            download_all = True
+            chapter_index = 0
+
+        if download_all:
+            logger.info(f"[JM] {book_id} 指向整本，共 {len(episodes)} 章")
+            # 整本才受章节数与总图片数限制；点名单章是有边界的请求，
+            # 不该被整本的上限挡住，否则大长篇连一章都取不了
+            if len(episodes) > self.max_chapters:
+                raise TooManyChaptersError(
+                    f"共 {len(episodes)} 章，超过上限 {self.max_chapters} 章。"
+                    f"可改用 /jm {book_id} <章号> 只取其中一章"
+                )
+            if album.page_count > _MAX_ALBUM_IMAGES:
+                raise TooManyAlbumImagesError(
+                    f"共 {album.page_count} 张，超过硬性上限 {_MAX_ALBUM_IMAGES} 张"
+                )
 
         # create_photo_detail 接收章节下标（0 起）
         photo = album.create_photo_detail(chapter_index)
@@ -370,17 +400,20 @@ class JmDownloaderPlugin(Star):
         images = len(photo)
         if images <= 0:
             raise MissingBookError("该本子没有任何图片")
-        if not is_multi and images > self.max_images:
+        # 只取单章时按单章上限校验；整本下载时每章的张数在下载过程中校验
+        if not download_all and images > self.max_images:
             raise TooManyImagesError(f"共 {images} 张，超过上限 {self.max_images} 张")
 
         return {
             "is_multi": is_multi,
+            "download_all": download_all,
             "total_chapters": len(episodes),
             "chapter_index": chapter_index,
             "chapter_number": chapter_index + 1,
+            # 章节 ID 查出来的 album.id 就是该章节 ID，不能用来代表整本；
+            # episode_list 是父专辑的，首章的 photo id 才等同于专辑 id
             "album_title": album.title or f"JM{book_id}",
-            "album_id": str(album.id),
-            "first_photo_id": str(episodes[0][0]),
+            "album_id": str(episodes[0][0]),
             "images": images,
         }
 
@@ -446,6 +479,14 @@ class JmDownloaderPlugin(Star):
         album = client.get_album_detail(info["album_id"])
         episodes = album.episode_list
 
+        # 用户点名要某一章时只处理该章，不把整本拖下来
+        if not info["download_all"]:
+            index = info["chapter_index"]
+            episodes = [episodes[index]]
+            chapter_offset = index
+        else:
+            chapter_offset = 0
+
         work_dir = tempfile.mkdtemp(prefix="jm_album_", dir=self.output_dir)
         pdfs: list[str] = []
         failures: list[str] = []
@@ -453,16 +494,18 @@ class JmDownloaderPlugin(Star):
         try:
             for index, episode in enumerate(episodes):
                 photo_id = str(episode[0])
-                number = index + 1
+                # 章节序号用它在整本中的真实位置，而不是本次循环的序号
+                number = chapter_offset + index + 1
                 try:
-                    pdf_path = self._download_chapter_pdf(photo_id, work_dir, number)
+                    pdf_path = self._download_chapter_pdf(photo_id, number)
+                except TooManyImagesError as exc:
+                    logger.warning(f"[JM] 跳过第 {number} 章：{exc}")
+                    failures.append(f"第 {number} 章（图片过多）")
+                    continue
                 except Exception as exc:
                     logger.warning(f"[JM] 第 {number} 章（{photo_id}）下载失败：{exc}")
                     failures.append(f"第 {number} 章")
                     continue
-
-                if self.lock_password:
-                    _encrypt_pdf(pdf_path, self.lock_password)
 
                 # 移入工作目录并统一命名，避免与输出目录里的旧文件混淆
                 target = os.path.join(
@@ -475,7 +518,12 @@ class JmDownloaderPlugin(Star):
             if not pdfs:
                 raise RuntimeError("所有章节都下载失败")
 
-            zip_name = f"{_safe_filename(info['album_title'], info['album_id'])}.zip"
+            # 只取单章时把章号写进包名，否则多个单章包会分不清
+            chapter_tag = None if info["download_all"] else chapter_offset + 1
+            zip_name = (
+                f"{_safe_filename(info['album_title'], info['album_id'], chapter_tag)}"
+                ".zip"
+            )
             zip_path = os.path.join(self.output_dir, zip_name)
             chapters = len(pdfs)
 
@@ -490,19 +538,31 @@ class JmDownloaderPlugin(Star):
                 "name": zip_name,
                 "title": info["album_title"],
                 "chapters": chapters,
+                "images": info["images"],
                 "failures": failures,
+                "download_all": info["download_all"],
             }
         finally:
             # 清理本次请求留下的临时目录
             self._cleanup_dir(work_dir)
 
-    def _download_chapter_pdf(self, photo_id: str, work_dir: str, number: int) -> str:
-        """下载单个章节并生成 PDF，返回 PDF 路径。"""
+    def _download_chapter_pdf(self, photo_id: str, number: int) -> str:
+        """下载单个章节并生成 PDF，返回 PDF 路径。
+
+        整本下载时逐章校验张数：``_validate_book`` 只看得到首章，管不住
+        后面那些异常长的章节。
+        """
         option = self._get_option()
 
         before = set(os.listdir(self.output_dir))
         # 必须传编号字符串：传实体对象会被当成批量下载的迭代对象
         result = option.download_photo(photo_id)
+
+        chapter_images = len(result.detail)
+        if chapter_images > self.max_images:
+            raise TooManyImagesError(
+                f"共 {chapter_images} 张，超过单章上限 {self.max_images} 张"
+            )
 
         pdf_path = next(iter(result.manifest.get_export_filepath_list("pdf")), None)
         if not pdf_path or not os.path.exists(pdf_path):
@@ -512,6 +572,36 @@ class JmDownloaderPlugin(Star):
 
         logger.info(f"[JM] 第 {number} 章完成：{os.path.basename(pdf_path)}")
         return pdf_path
+
+    def _wrap_pdf_into_zip(self, outcome: dict) -> dict:
+        """把单章 PDF 打包成 ZIP（可选加密），返回新的结果字典。
+
+        开启加密时单章也走 ZIP：这样无论是单章还是多章，投递的都是一个
+        受密码保护的容器，行为一致。加密后删除原始 PDF，避免在输出目录里
+        留下未加密的副本。
+        """
+        pdf_path = os.path.abspath(outcome["path"])
+        zip_name = f"{os.path.splitext(outcome['name'])[0]}.zip"
+        zip_path = os.path.join(self.output_dir, zip_name)
+
+        self._make_zip([pdf_path], zip_path)
+        if self.lock_password:
+            os.remove(pdf_path)
+
+        logger.info(
+            f"[JM] 已打包 → {zip_name}"
+            f"（{os.path.getsize(zip_path) / 1024 / 1024:.1f} MB）"
+        )
+
+        return {
+            **outcome,
+            "kind": "zip",
+            "path": zip_path,
+            "name": zip_name,
+            "chapters": 1,
+            "failures": [],
+            "download_all": False,
+        }
 
     def _make_zip(self, pdf_paths: list[str], zip_path: str) -> int:
         """把若干 PDF 打包成 ZIP（有密码时加密），返回文件大小。"""
@@ -552,27 +642,47 @@ class JmDownloaderPlugin(Star):
     # ---------------------------------------------------------------- 指令
 
     @filter.command("jm")
-    async def jm(self, event: AstrMessageEvent, book_id: str = ""):
-        """下载指定编号的本子并发送 PDF。"""
-        book_id = (book_id or "").strip()
+    async def jm(self, event: AstrMessageEvent, args: str = ""):
+        """下载指定编号的本子并发送 PDF。
 
-        if not book_id:
+        用法：``/jm <编号> [章号]``。
+        """
+        parts = (args or "").split()
+        if not parts:
             yield event.plain_result("请提供本子编号，例如：/jm 422866")
             return
 
-        match = _ID_PATTERN.search(book_id)
+        match = _ID_PATTERN.search(parts[0])
         if not match:
             yield event.plain_result(
-                f"编号格式不正确：{book_id}\n请使用纯数字编号，例如：/jm 422866"
+                f"编号格式不正确：{parts[0]}\n请使用纯数字编号，例如：/jm 422866"
             )
             return
         book_id = match.group()
 
-        yield event.plain_result(f"收到，正在查询 JM{book_id}，请稍候…")
+        # 第二个参数是章号，用于只取多章节本子中的某一章
+        chapter = None
+        if len(parts) > 1:
+            try:
+                chapter = int(parts[1])
+            except ValueError:
+                yield event.plain_result(
+                    f"章号格式不正确：{parts[1]}\n应为一个数字，例如：/jm {book_id} 2"
+                )
+                return
+            if chapter < 1:
+                yield event.plain_result("章号从 1 开始，例如：/jm 553653 1")
+                return
+
+        hint = f"第 {chapter} 章" if chapter is not None else "整本"
+        yield event.plain_result(f"收到，正在查询 JM{book_id}（{hint}），请稍候…")
 
         try:
             # 网络与下载均为阻塞操作，放到线程池执行，避免卡住事件循环
-            info = await asyncio.to_thread(self._validate_book, book_id)
+            info = await asyncio.to_thread(self._validate_book, book_id, chapter)
+        except ChapterNotFoundError as exc:
+            yield event.plain_result(f"{exc}")
+            return
         except MissingBookError:
             yield event.plain_result("未查询到相关本子")
             return
@@ -595,11 +705,10 @@ class JmDownloaderPlugin(Star):
 
         timeout = float(self.config.get("timeout", 1800))
 
-        if info["is_multi"]:
-            target = (
-                f"{info['album_title']}（共 {info['total_chapters']} 章，"
-                f"从第 {info['chapter_number']} 章开始）"
-            )
+        if info["download_all"]:
+            target = f"{info['album_title']}（整本，共 {info['total_chapters']} 章）"
+        elif info["is_multi"]:
+            target = f"{info['album_title']}（第 {info['chapter_number']} 章）"
         else:
             target = info["album_title"]
         logger.info(f"[JM] 开始下载 {book_id}：{target}")
@@ -622,6 +731,7 @@ class JmDownloaderPlugin(Star):
                         "kind": "pdf",
                         "title": title,
                         "images": images,
+                        "download_all": False,
                     }
         except asyncio.TimeoutError:
             yield event.plain_result(
@@ -632,6 +742,15 @@ class JmDownloaderPlugin(Star):
             logger.exception(f"[JM] 下载 {book_id} 失败")
             yield event.plain_result(f"下载失败：{self._brief(exc)}")
             return
+
+        # 开启加密时，单章产物也打包成加密 ZIP，使投递形式与多章一致
+        if self.lock_password and outcome["kind"] == "pdf":
+            try:
+                outcome = await asyncio.to_thread(self._wrap_pdf_into_zip, outcome)
+            except Exception as exc:
+                logger.exception(f"[JM] 打包 {outcome['name']} 失败")
+                yield event.plain_result(f"打包失败：{self._brief(exc)}")
+                return
 
         # 发送
         try:
@@ -652,16 +771,16 @@ class JmDownloaderPlugin(Star):
         size_mb = os.path.getsize(outcome["path"]) / 1024 / 1024
         lines = [outcome["title"]]
 
-        if outcome["kind"] == "zip":
+        # 整本下载才报章节数；单章（无论是否被包进 ZIP）按单章措辞
+        if outcome.get("download_all"):
             lines.append(
                 f"已打包 {outcome['chapters']} 章，ZIP {size_mb:.1f} MB，已发送"
             )
             if outcome["failures"]:
-                lines.append(
-                    f"以下章节下载失败：{'、'.join(outcome['failures'])}"
-                )
+                lines.append(f"以下章节下载失败：{'、'.join(outcome['failures'])}")
         else:
-            lines.append(f"共 {outcome['images']} 张，PDF {size_mb:.1f} MB，已发送")
+            label = "ZIP" if outcome["kind"] == "zip" else "PDF"
+            lines.append(f"共 {outcome['images']} 张，{label} {size_mb:.1f} MB，已发送")
 
         if self.lock_password:
             lines.append(f"解压密码：{self.lock_password}")
@@ -676,7 +795,10 @@ class JmDownloaderPlugin(Star):
             "/jm <编号>\n"
             "--下载指定编号的本子，成功后以 PDF 发送\n"
             "--编号可在本子详情页的地址栏中获取\n"
-            "--多章节作品给出其中某一章的编号即下载该章\n"
+            "\n"
+            "/jm <编号> <章号>\n"
+            "--只下载多章节本子中的某一章\n"
+            "--例：/jm 553653 2 取第 2 章\n"
             "\n"
             "/jmhelp\n"
             "--查看帮助\n"
